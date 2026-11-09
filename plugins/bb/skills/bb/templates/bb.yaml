@@ -10,6 +10,7 @@ server:
   route: direct        # direct, ssh-tunnel or tailscale: how the bb CLI here reaches the server
   ssh_host: null       # ssh-tunnel only: the host to tunnel to
   url: http://127.0.0.1:38886   # BB_SERVER_URL for the bb CLI here
+  cli_data_dir: null   # BB_DATA_DIR for the bb CLI here: an empty folder once the server moved away from this computer
 
 project: <proj_…>      # the bb project of this repository
 tracker: <PREFIX>      # its bb Tasks project

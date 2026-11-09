@@ -61,10 +61,13 @@ say in one line that a ticket's manager does that, and offer to start one.
 2. Find the CLI: `command -v bb`, else `~/.bb/bin/bb` (the desktop app's copy). If only the latter exists, offer to
    put `bb` on PATH: Settings → General → Command line → Install, or `bb settings cli-command install`.
 3. Reach the server at the marker's `server.url`. Shell state does not carry between your commands, so prefix each
-   one with `BB_SERVER_URL=<url>` unless the URL is the default `http://127.0.0.1:38886`. An `ssh-tunnel` route
-   needs its tunnel up first (below).
-4. Check: `bb --version`, `bb status --json`, `bb machine list --json`. The machine with role `server` must be the
-   marker's `server.machine`. If it differs, or the server does not answer, tell the user what you found before
+   one with `BB_SERVER_URL=<url>` unless the URL is the default `http://127.0.0.1:38886`, and with
+   `BB_DATA_DIR=<dir>` when the marker has `server.cli_data_dir`. An `ssh-tunnel` route needs its tunnel up first
+   (below).
+4. Check: `bb --version`, `bb status --json`, `bb machine list --json`, `bb server move status`. The server must run
+   on the marker's `server.machine`: `bb machine list` has no server role, so take it from `bb server move status`
+   ("The server last moved from … to <machine>"), or, if the server never moved, it is the machine whose bb app or
+   service serves `server.url`. If it differs, or the server does not answer, tell the user what you found before
    anything else, and fix the route or the marker with them.
 
 ## Where the server runs
@@ -81,6 +84,10 @@ it.
 
 - No `bb` on this machine: `npm install -g bb-app@<the server's version>` installs the CLI. The user can save the
   URL with `npx bb-app config set BB_SERVER_URL <url>`.
+- A computer the server moved away from is an enrolled machine: its `~/.bb` holds machine credentials, and the
+  server answers its CLI with `HTTP 401: Unauthorized` over the tunnel although the API itself needs none. Run the
+  CLI there with an empty data directory, such as `BB_DATA_DIR=~/.bb-remote-cli`, and record it in the marker as
+  `server.cli_data_dir`.
 - Never suggest binding the server to `0.0.0.0` or publishing it through Tailscale Funnel: bb's API has no
   authentication and runs commands.
 - Paths name files on the machine they belong to: `bb project create --root` and `bb project source add --path`
@@ -107,9 +114,14 @@ Run when the repository has no marker.
    - the manager's provider and model: the provider's default model (recommended), or another;
    - whether a ticket starts on its own when moved to Todo (intake), or only with Delegate (recommended: only with
      Delegate; intake can be added later).
+
+   If the user wants a remote server and the server runs here today, set up here first: enroll the remote machine
+   and give the project its source there (steps 1–3 of "Move the server"), apply the steps below except the marker,
+   then move the server. Ids survive the move, so the marker is written once, with the final route.
 3. **Apply**, one step at a time, each shown before it runs:
-   1. Tasks: `bb plugin install tasks`. Automations and push notifications ship with bb; enable them with
-      `bb plugin enable <id>` if they are disabled.
+   1. Tasks: `bb plugin install tasks --yes`. bb refuses to install a plugin without `--yes`, so ask the user first.
+      Automations and push notifications ship with bb; enable them with `bb plugin enable <id>` if they are
+      disabled.
    2. bb project: the existing one, or `bb project create --name <repo name> --root <path> [--machine <m>] --json`.
       With a remote server, the repository must be on that machine: `--root` with its path there, or create the
       project and then `bb project source add <proj_…> --clone --machine <m> --default` to clone the git remote.
@@ -158,11 +170,42 @@ Ids stay the same, so the bb project, the Tasks project, the preset and the peri
 experimental. bb's own rule binds you: never move the server, abandon a move or unlock an old copy without the
 user's explicit confirmation in this conversation.
 
-1. **Check the target.** It stays on, has git access to the repository, has the providers' CLIs signed in (such as
-   `claude`), and has `python3` if there are periodic tasks or intake.
-2. **Enroll it**, if `bb machine list` lacks it: `bb machine create --provider manual --json` prints one command;
-   the user runs it on the target, or you run it over ssh once they agree. Wait until the machine is `connected`.
-   Remote machines reach the server through bb connect (`bb connect status`) or a direct URL (Tailscale).
+1. **Check the target.** It stays on, and has:
+   - Node.js 22.19 or newer (`node --version`): the machine installer runs on it and stops with `node: not found`
+     without it;
+   - git access to the repository that works without a terminal: bb fetches the remote URL as stored, often
+     `https://github.com/…`. For a private repository, use a deploy key with write access plus
+     `git config --global url."git@github.com:".insteadOf https://github.com/`, or `gh auth login` and
+     `gh auth setup-git`. Check with `GIT_TERMINAL_PROMPT=0 git ls-remote <remote url>`;
+   - the providers' CLIs signed in, such as `claude`: `bb machine provider-cli install <target> <provider>`
+     installs one, and the user signs it in over `ssh -t` in their own terminal;
+   - `python3` if there are periodic tasks or intake;
+   - memory: the server and one Claude Code manager take about 1.5 GB, so a 1 GB machine runs one manager deep in
+     swap and its workers slowly.
+
+   Then check what the move takes along. Automations run on the server machine, so after the move every project's
+   automations run on the target, not only this repository's. For each project in `bb project list --json`, read
+   `bb automation list --project <proj_…> --json` and look for the old computer's paths, `PATH` or env values.
+   `--check` does not flag them. Pause those (`bb automation pause <id> --project <proj_…>`) or fix them before the
+   move, with the user.
+2. **Enroll it**, if `bb machine list` lacks it: `bb machine create --provider manual --json` prints one command
+   and then keeps running until the machine connects, so start it in the background and read the command from its
+   output, which also says when the command expires. The user runs it on the target, or you run it over ssh once
+   they agree; it carries a secret, so pass it on ssh's stdin rather than printing it. Wait until the machine is
+   `connected`. Remote machines reach the server through bb connect (`bb connect status`) or a direct URL
+   (Tailscale).
+
+   On Linux the installer adds a system systemd service, `bb-host-daemon-…`, that runs without `HOME`. git then
+   ignores `~/.gitconfig` (the `insteadOf` rule and credential helpers above), and so do other tools threads run.
+   Once the user agrees, give the service a `HOME` and restart it; after the move it also runs the server, so the
+   restart takes bb down for a few seconds:
+
+   ```sh
+   U=$(systemctl list-units --type=service --plain --no-legend 'bb-host-daemon-*' | awk '{print $1}')
+   mkdir -p /etc/systemd/system/$U.d
+   printf '[Service]\nEnvironment=HOME=%s\n' "$HOME" > /etc/systemd/system/$U.d/home.conf
+   systemctl daemon-reload && systemctl restart $U
+   ```
 3. **Give the project a source there**, so its threads run on the new server:
    `bb project source add <proj_…> --clone --machine <target> --default`, or `--path` for an existing checkout.
 4. **Turn on the experiment and check:** `bb settings experiment serverMove true`, then
@@ -170,9 +213,10 @@ user's explicit confirmation in this conversation.
 5. **Move**, after the user confirms: the user runs `bb server move --to <target>` in their own terminal and answers
    its confirmation. Do not pass `--yes`. A server without bb connect also needs `--address <url>`, the URL every
    machine and app will use for it. Follow with `bb server move status`.
-6. **After the move**: set the route for the new place (the table above), update the marker's `server` section, and
-   check with `bb machine list --json` that the target has role `server`. Make the project's source on the new
-   server the default (`bb project source update <proj_…> <source> --default`). Run each periodic task once with
+6. **After the move**: set the route for the new place (the table above). When the server moved away from this
+   computer, its CLI also needs an empty `BB_DATA_DIR` (see "Where the server runs"). Update the marker's `server`
+   section, and check with `bb server move status` that the server last moved to the target. Make the project's
+   source on the new server the default (`bb project source update <proj_…> <source> --default`). Run each periodic task once with
    `bb automation run` to see that its script works there. The old computer stays enrolled as a machine; offer
    `bb server delete-old-copy` there only once the user is satisfied.
 
