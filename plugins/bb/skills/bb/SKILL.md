@@ -82,6 +82,11 @@ it.
 | `remote` | `ssh-tunnel` (recommended) | `ssh -fN -L 38896:127.0.0.1:38886 <ssh_host>`, then `BB_SERVER_URL=http://127.0.0.1:38896`. Nothing is exposed; port 38896 leaves 38886 to a bb on this machine. |
 | `remote` | `tailscale` | On the server: `tailscale serve --bg --https=443 http://127.0.0.1:38886`. Here: `BB_SERVER_URL=https://<machine>.<tailnet>.ts.net`. |
 
+- An `ssh -fN` tunnel ends when this computer sleeps, reboots or loses the network. Offer to keep it up: on macOS a
+  launch agent in `~/Library/LaunchAgents/` that runs `/usr/bin/ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes
+  -o ServerAliveInterval=30 -L 38896:127.0.0.1:38886 <ssh_host>` with `RunAtLoad`, `KeepAlive` and a
+  `ThrottleInterval` of 15; on Linux a `systemd --user` service with `Restart=always`. `BatchMode` needs a key
+  without a passphrase prompt. Record it in the marker as `server.tunnel`.
 - No `bb` on this machine: `npm install -g bb-app@<the server's version>` installs the CLI. The user can save the
   URL with `npx bb-app config set BB_SERVER_URL <url>`.
 - A computer the server moved away from is an enrolled machine: its `~/.bb` holds machine credentials, and the
@@ -155,6 +160,24 @@ Run when the repository has no marker.
    ```
 
    Within a few minutes `bb tasks show <KEY> --json` has a manager thread, the comment and status `done`. Show it.
+   If the thread fails, `bb thread show <thread> --json` holds the error: fix the cause with the user, then
+   `bb thread retry <thread>`.
+
+   **Full check**, when threads run on another machine or agents will open pull requests. The smoke test starts no
+   workers, so it does not show that a worker can push or open a pull request, or that the user's comments reach
+   the manager. Ask first: it pushes a branch and opens a draft pull request, which you close afterwards.
+
+   ```sh
+   bb tasks create --project <PREFIX> --title "Full check" --json --description "Setup check. Start exactly one \
+   hidden worker. Its part: in its worktree, add .bb/checks/ok.md with the current date, commit it on its own \
+   branch, push the branch, open a draft pull request with gh pr create --draft, and report DONE with its URL. \
+   Then comment the URL on this ticket, set the status to done, and stop. Do not merge or close the pull request."
+   bb tasks dispatch <KEY> --preset Manager
+   ```
+
+   Once it is `done`, check the branch and the pull request on the git host, then send
+   `bb tasks comment <KEY> --notify --body "Notify check: reply 'notify ok' as a ticket comment."` and wait for the
+   manager's reply on the ticket. Close the pull request and delete its branch (`gh pr close <n> --delete-branch`).
 5. **Report**: the diagram with the user's names in it, a table of what was set up with ids, and how to put work in
    without opening a session:
    - in the bb app, on a computer or the phone: Tasks → new task → Delegate → Manager; with intake, moving the task
@@ -179,9 +202,24 @@ user's explicit confirmation in this conversation.
      `gh auth setup-git`. Check with `GIT_TERMINAL_PROMPT=0 git ls-remote <remote url>`;
    - the providers' CLIs signed in, such as `claude`: `bb machine provider-cli install <target> <provider>`
      installs one, and the user signs it in over `ssh -t` in their own terminal;
+   - `gh` signed in, if agents are to open pull requests: workers run `gh` on the machine that holds the source.
+     Threads run with `auto` permissions, so prefer a fine-grained token limited to the repository (Contents and
+     Pull requests: read and write) to a browser login, which hands them the whole account. The user enters the
+     token in their own terminal. Give the commands as short lines, because a wrapped line breaks when pasted:
+
+     ```sh
+     ssh -t <ssh_host>
+     read -rsp 'Token: ' T; echo
+     echo "$T" | gh auth login --with-token
+     unset T; gh auth status
+     ```
+
+     Check with `gh repo view <owner>/<repo>`;
    - `python3` if there are periodic tasks or intake;
    - memory: the server and one Claude Code manager take about 1.5 GB, so a 1 GB machine runs one manager deep in
-     swap and its workers slowly.
+     swap and its workers slowly;
+   - processors: bb runs one thread per processor on a machine by default (`bb concurrency-limit status`), so on one
+     vCPU a manager's workers run one after another.
 
    Then check what the move takes along. Automations run on the server machine, so after the move every project's
    automations run on the target, not only this repository's. For each project in `bb project list --json`, read
@@ -277,6 +315,8 @@ question or fails. Hidden workers never notify.
    browser. `bb connect status` then says `connected`.
 2. The app: Settings → Mobile has the iOS (TestFlight) and Android downloads and pairs the phone.
 3. Notifications: `push-notifications` is running, and Settings → Push notifications has Mobile on.
+   `bb push-notifications list` shows the paired phone; without it, no push can arrive. Send a test with
+   `bb push-notifications send --title "bb test"` and ask the user whether it arrived.
 
 ## Maintenance
 
